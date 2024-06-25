@@ -14,17 +14,17 @@ import torch.nn.functional as F
 
 data_path = "./dataset/processed/train.csv"
 ds = pd.read_csv(data_path, dtype={"id": str})
-print("loaded data")
 
 max_token_len = 512
 X = ds["comment_text"]
 y = ds["score"]
+X, _, y, _ = train_test_split(X, y, test_size=0.7, random_state=103)
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=103)
 train_ds = pd.DataFrame({"comment_text": X_train, "score": y_train})
 val_ds = pd.DataFrame({"comment_text": X_test, "score": y_test})
 
 class ToxicityDataset(Dataset):
-    def __init__(self, data, tokenizer, max_token_len, sample = 700_000):
+    def __init__(self, data, tokenizer, max_token_len, sample = 10_000):
         self.data = data
         self.tokenizer = tokenizer
         self.max_token_len = int(max_token_len)
@@ -60,10 +60,8 @@ class ToxicityDataset(Dataset):
 
 model_name = "roberta-base"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
-print("created tokenizer")
 train_dataset = ToxicityDataset(train_ds, tokenizer, max_token_len)
 val_dataset = ToxicityDataset(val_ds, tokenizer, max_token_len, sample=None)
-print("created datasets")
 
 class ToxicityDataModule(pl.LightningDataModule):
     def __init__(self, train_data, val_data, max_token_len, model_name, batch_size):
@@ -146,30 +144,29 @@ class ToxicityClassifier(pl.LightningModule):
         scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
         return [optimizer], [scheduler]
 
-data_module = ToxicityDataModule(train_ds, val_ds, max_token_len, model_name = "roberta-base", batch_size=128)
+data_module = ToxicityDataModule(train_ds, val_ds, max_token_len, model_name = "roberta-base", batch_size=32)
 data_module.setup()
-print("setup data module")
 
 config = {
     "model_name": "distilroberta-base",
     "n_labels": 1,
-    "batch_size": 128,
-    "lr": 1.5e-6,
-    "warmup": 0.2,
+    "batch_size": 32,
+    "lr": 1e-4,
+    "warmup": 0.1,
     "train_size": len(data_module.train_dataloader()) ,
     "w_decay": 0.001,
-    "n_epochs": 1
+    "n_epochs": 3
 }
 
 data_module = ToxicityDataModule(train_ds, val_ds, max_token_len, model_name = config["model_name"], batch_size = config["batch_size"])
 data_module.setup()
-print("setup data module")
 
 model = ToxicityClassifier(config)
-print(model.device)
-model.to("cuda")
 
-# idx=0
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model.to(device)
+torch.set_float32_matmul_precision("medium")
+
 # input_ids = train_dataset.__getitem__(idx)['input_ids']
 # attention_mask = train_dataset.__getitem__(idx)['attention_mask']
 # label = train_dataset.__getitem__(idx)['label']
@@ -178,6 +175,7 @@ model.to("cuda")
 # print(label.shape, output.shape, output)
 
 if __name__ == "__main__":
-    trainer = pl.Trainer(max_epochs=config["n_epochs"], num_sanity_val_steps=2, logger = True, enable_progress_bar = True, num_nodes = 1)
+    trainer = pl.Trainer(max_epochs=config["n_epochs"], num_sanity_val_steps=2, logger = True, enable_progress_bar = True, num_nodes = 1, precision=16)
     print("created model. starting to fit the model...")
     trainer.fit(model, data_module)
+    torch.save(model.state_dict(), './model.pth')
